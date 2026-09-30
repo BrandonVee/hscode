@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import psycopg
 from psycopg.rows import dict_row
 
@@ -44,7 +45,16 @@ def build_vectors(dsn: str, *, batch_size: int = 64, threads: int = 4,
         print(f"模型 {MODEL_NAME}，维度 {DIMENSION}；待生成 {target} 条", flush=True)
         generated = 0
         if target:
-            model = load_model(threads=threads)
+            started = time.perf_counter()
+            print("准备模型：读取缓存或首次下载；此时尚未开始生成向量", flush=True)
+            try:
+                model = load_model(threads=threads)
+            except Exception as exc:
+                raise RuntimeError(
+                    "模型准备失败：请配置可访问的 HF_ENDPOINT，或通过 HS_MODEL_PATH 使用本地模型。"
+                    f"原始错误：{exc}"
+                ) from exc
+            print(f"模型已就绪，用时 {time.perf_counter() - started:.1f} 秒；开始生成向量", flush=True)
             last_code = ""
             while generated < target:
                 rows = conn.execute(
@@ -72,6 +82,7 @@ def build_vectors(dsn: str, *, batch_size: int = 64, threads: int = 4,
                 generated += len(rows)
                 last_code = rows[-1]["code"]
                 print(f"已生成 {generated}/{target}", flush=True)
+        print("建立或检查 HNSW 索引", flush=True)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_hs_code_embedding ON hs_code "
             "USING hnsw (embedding public.vector_cosine_ops) "
@@ -90,8 +101,11 @@ def main() -> None:
     parser.add_argument("--rebuild", action="store_true", help="重新生成全部中国品名向量")
     parser.add_argument("--limit", type=positive_int, help="本次最多生成条数，用于分批验证")
     args = parser.parse_args()
-    build_vectors(args.dsn, batch_size=args.batch_size, threads=args.threads,
-                  rebuild=args.rebuild, limit=args.limit)
+    try:
+        build_vectors(args.dsn, batch_size=args.batch_size, threads=args.threads,
+                      rebuild=args.rebuild, limit=args.limit)
+    except Exception as exc:
+        parser.exit(1, f"向量生成失败：{exc}\n")
 
 
 if __name__ == "__main__":

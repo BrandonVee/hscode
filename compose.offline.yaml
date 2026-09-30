@@ -1,0 +1,12 @@
+# 使用从 Qdrant/bge-small-zh-v1.5 下载并上传到 ./models 的完整模型目录。
+services:
+  app:
+    environment:
+      HS_MODEL_PATH: /opt/model
+    volumes:
+      - ./models:/opt/model:ro
+  vectors:
+    environment:
+      HS_MODEL_PATH: /opt/model
+    volumes:
+      - ./models:/opt/model:ro

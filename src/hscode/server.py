@@ -147,22 +147,22 @@ def tokenize(text: str, country: str) -> list[str]:
 # 稀有度权重（IDF）
 # --------------------------------------------------------------------------- #
 
-_embed_model: object | None | bool = None  # None=未加载，False=不可用，否则是模型实例
+_embed_model: object | None = None
 
 
 def embed_model():
     """加载句向量模型（懒加载，进程内单例）。
 
-    装不上 fastembed 或下载不到模型时返回 False，向量档会被跳过，
+    仅加载本地模型缓存，不在请求过程中联网下载；不可用时跳过向量档。
     其余检索路径照常工作——语义召回是增强项，不是必备依赖。
     """
     global _embed_model
     if _embed_model is None:
         try:
-            _embed_model = load_model()
-        except Exception:  # 依赖缺失 / 模型下载失败都降级，不拖垮整个服务
-            _embed_model = False
-    return _embed_model or None
+            _embed_model = load_model(download=False)
+        except Exception:  # 缓存尚未准备好时，下次请求可重新尝试加载
+            return None
+    return _embed_model
 
 
 def vector_recall(
@@ -186,7 +186,13 @@ def vector_recall(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid='hs_code'::regclass AND attname='embedding' AND NOT attisdropped) AS ready"
     ).fetchone()["ready"]
-    if not ready or not embed_model():
+    if not ready:
+        return []
+    complete = conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM hs_code WHERE country='CN') "
+        "AND NOT EXISTS (SELECT 1 FROM hs_code WHERE country='CN' AND embedding IS NULL) AS ready"
+    ).fetchone()["ready"]
+    if not complete or not embed_model():
         return []
     try:
         vec = next(iter(embed_model().embed([keyword])))

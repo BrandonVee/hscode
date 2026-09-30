@@ -7,7 +7,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
-async def verify(url: str) -> None:
+async def verify(url: str, *, allow_no_vectors: bool = False) -> None:
     async with streamable_http_client(url) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -29,15 +29,17 @@ async def verify(url: str) -> None:
                 if payload is None:
                     payload = json.loads(next(block.text for block in result.content if block.type == "text"))
                 assert payload.get("count", payload.get("found", False)), payload
-                if arguments.get("keyword") == "保温杯":
+                if arguments.get("keyword") == "保温杯" and not allow_no_vectors:
                     assert payload["match"] == "vector", payload
                 print(f"通过：{name} {arguments}")
             resource = await session.read_resource("hs://dataset-info")
             assert resource.contents
-            print("MCP HTTP 工具、语义检索及资源验证通过")
+            print("MCP HTTP 工具及资源验证通过" + ("（允许全文检索模式）" if allow_no_vectors else "，语义检索已验证"))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8765/mcp/hscode")
-    asyncio.run(verify(parser.parse_args().url))
+    parser.add_argument("--allow-no-vectors", action="store_true", help="向量尚未生成时验证全文检索服务")
+    args = parser.parse_args()
+    asyncio.run(verify(args.url, allow_no_vectors=args.allow_no_vectors))

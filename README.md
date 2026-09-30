@@ -11,7 +11,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-启动流程：PostgreSQL 首次导入 `data/hscode_dump.sql` → `vectors` 任务生成 9,579 条中国品名向量和 HNSW 索引 → `app` 启动 MCP HTTP 服务。首次运行需要下载模型；数据库和模型缓存分别保存在 `pgdata`、`model_cache` 卷中。后续启动只补缺失向量。
+PostgreSQL 首次导入 `data/hscode_dump.sql` 后，`app` 启动全文查询服务，`vectors` 在后台生成 9,579 条中国品名向量和 HNSW 索引。首次生成需要下载模型；数据库和模型缓存分别保存在 `pgdata`、`model_cache` 卷中。后续启动只补缺失向量，模型和向量就绪后服务自动启用语义检索。
 
 默认 MCP 地址：`http://127.0.0.1:8765/mcp/hscode`，使用 Streamable HTTP，无状态模式。可通过 `.env` 中的 `HSCODE_PORT` 修改宿主机端口。数据库仅供 Compose 网络内的应用连接。
 
@@ -22,7 +22,7 @@ docker compose logs -f vectors app
 docker compose down
 ```
 
-基础 SQL 只在数据库卷首次初始化时导入；已有卷不会因文件更新而重新灌库。`app` 等待数据库健康和向量任务成功后才启动，HTTP 健康检查通过 MCP initialize 请求验证服务。
+基础 SQL 只在数据库卷首次初始化时导入；已有卷不会因文件更新而重新灌库。`app` 仅等待数据库健康，向量下载或生成失败不会阻止全文查询服务启动。HTTP 健康检查通过 MCP initialize 请求验证服务。
 
 构建时若 `apt-get` 或 Python 包下载很慢，可将 `.env` 中的软件源改为：
 
@@ -61,7 +61,35 @@ uv sync
 uv run python scripts/smoke_test.py
 ```
 
-向量固定使用 `BAAI/bge-small-zh-v1.5`（512 维），建库和查询共用配置。生成脚本按批提交，中断后重新运行即可继续；支持 `--batch-size`、`--threads`、`--limit` 和 `--rebuild`。美国数据继续使用全文检索。未生成向量的数据库仍支持全文查询。
+向量固定使用 `BAAI/bge-small-zh-v1.5`（512 维），建库和查询共用配置。生成脚本按批提交，中断后重新运行即可继续；支持 `--batch-size`、`--threads`、`--limit` 和 `--rebuild`。脚本会分别显示模型准备、向量生成和索引建立阶段。美国数据继续使用全文检索。请求处理只读本地模型缓存，不联网下载；模型或向量未就绪时使用全文查询。
+
+## 模型下载失败
+
+`httpx.ConnectError: Network is unreachable` 表示模型端点无法连接，尚未开始推理。构建时的 PyPI 镜像不会改变模型下载地址。国内网络可在 `.env` 设置：
+
+```dotenv
+HF_ENDPOINT=https://hf-mirror.com
+HF_HUB_DISABLE_XET=1
+```
+
+然后重新创建使用新环境变量的容器：
+
+```sh
+docker compose up -d
+docker compose logs -f vectors
+# 也可以在前台运行，直接查看准备阶段及失败原因
+docker compose run --rm vectors
+```
+
+端点配置参考 [HF-Mirror 说明](https://hf-mirror.com/)；缓存和离线环境配置见 [Hugging Face 文档](https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables)。
+
+服务器完全无法下载时，可在联网机器下载 [Qdrant/bge-small-zh-v1.5](https://huggingface.co/Qdrant/bge-small-zh-v1.5/tree/main) 的模型目录，上传至项目的 `models/`。目录中应直接包含 `model_optimized.onnx`、`tokenizer.json` 及模型配套 JSON 配置文件，然后使用离线配置启动：
+
+```sh
+docker compose -f compose.yaml -f compose.offline.yaml up -d
+```
+
+该配置将模型目录只读挂载到 `/opt/model`，生成和查询都跳过网络下载；模型权重不提交到 Git，也不属于数据库导出。
 
 导出脚本使用同一数据快照复制基础字段，通过临时数据库生成两种导出格式，结束后删除临时库；不改动源数据库中的现有向量。运行账户需要创建数据库权限。镜像包含 PostgreSQL 16 导出工具，数据库文件和模型权重不打入应用镜像。
 
