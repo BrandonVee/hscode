@@ -2,7 +2,12 @@ name: hscode
 
 x-app: &app
   image: hscode-mcp:local
-  build: .
+  build:
+    context: .
+    args:
+      PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.org/simple}
+      DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://deb.debian.org/debian}
+      DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
   environment: &app-env
     HSCode_DSN: "host=db port=5432"
     PGDATABASE: ${POSTGRES_DB:-hscode}

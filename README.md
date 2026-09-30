@@ -24,6 +24,23 @@ docker compose down
 
 基础 SQL 只在数据库卷首次初始化时导入；已有卷不会因文件更新而重新灌库。`app` 等待数据库健康和向量任务成功后才启动，HTTP 健康检查通过 MCP initialize 请求验证服务。
 
+构建时若 `apt-get` 或 Python 包下载很慢，可将 `.env` 中的软件源改为：
+
+```dotenv
+PYPI_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
+DEBIAN_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
+```
+
+然后单独构建共享应用镜像，再启动所有服务：
+
+```sh
+docker compose build app
+docker compose up -d
+```
+
+依赖安装与源码安装分层，使用 BuildKit 缓存保存已下载的软件包；源码修改不会使依赖层失效。切换 Python 镜像源时仍按 `uv.lock` 的版本及哈希安装，不重新选取依赖版本。第一次拉取基础镜像的速度由 Docker Registry 网络决定，上述配置只影响软件包下载。配置参考 [uv Docker 文档](https://docs.astral.sh/uv/guides/integration/docker/)、[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/) 和 [Debian 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/debian/)。
+
 镜像按构建机器的架构生成。若需在 x86 Linux 运行，可构建 amd64 镜像：
 
 ```sh
