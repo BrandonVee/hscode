@@ -15,6 +15,25 @@ PostgreSQL 首次导入 `data/hscode_dump.sql` 后，`app` 启动全文查询服
 
 默认 MCP 地址：`http://127.0.0.1:8765/mcp/hscode`，使用 Streamable HTTP，无状态模式。可通过 `.env` 中的 `HSCODE_PORT` 修改宿主机端口。数据库仅供 Compose 网络内的应用连接。
 
+### 远程客户端连接
+
+默认 `HSCODE_BIND_HOST=127.0.0.1`，端口仅允许服务器本机访问。若客户端通过服务器 IP 直连，在 `.env` 设置 `HSCODE_BIND_HOST=0.0.0.0`，执行 `docker compose up -d app` 重新创建应用容器；客户端使用 `http://服务器IP:8765/mcp/hscode`，云服务器安全组需允许客户端访问该端口。端口绑定规则见 [Docker 文档](https://docs.docker.com/engine/network/port-publishing/)。
+
+若使用服务器本机的 Nginx，保留本机绑定，代理到 `http://127.0.0.1:8765/mcp/hscode` 并保留完整路径；客户端填写域名下的对应 HTTPS 地址。Nginx 若也在 Docker 内，`127.0.0.1` 指向 Nginx 容器自身，应将代理容器接入应用网络并使用 `http://app:8765/mcp/hscode`。
+
+日志中约每 30 秒出现的本机 `POST /mcp/hscode 200 OK` 和 `Terminating session: None` 来自健康检查。它们验证容器内的 MCP initialize 请求，不能证明客户端到服务器的网络连接可用。客户端地址需要包含 `/mcp/hscode`；协议选择 Streamable HTTP。
+
+可在服务器本机验证 MCP 初始化，然后在客户端所在机器将地址换成实际连接地址，执行同一请求：
+
+```sh
+curl --connect-timeout 5 --max-time 15 -i http://127.0.0.1:8765/mcp/hscode \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"connection-check","version":"1.0"}}}'
+```
+
+成功时返回 HTTP 200 和 MCP 初始化结果。`fetch failed` 若未对应到应用访问日志，应先检查客户端 URL、监听地址、端口规则及反向代理连通性。
+
 ```sh
 docker compose ps -a
 docker compose logs -f vectors app

@@ -51,7 +51,7 @@ services:
   app:
     <<: *app
     ports:
-      - "127.0.0.1:${HSCODE_PORT:-8765}:8765"
+      - "${HSCODE_BIND_HOST:-127.0.0.1}:${HSCODE_PORT:-8765}:8765"
     depends_on:
       db:
         condition: service_healthy
