@@ -1,0 +1,68 @@
+name: hscode
+
+x-app: &app
+  image: hscode-mcp:local
+  build: .
+  environment: &app-env
+    HSCode_DSN: "host=db port=5432"
+    PGDATABASE: ${POSTGRES_DB:-hscode}
+    PGUSER: ${POSTGRES_USER:-hscode}
+    PGPASSWORD: ${POSTGRES_PASSWORD:-hscode-dev-password}
+    HS_MODEL_CACHE: /cache/models
+  volumes:
+    - model_cache:/cache
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hscode}
+      POSTGRES_USER: ${POSTGRES_USER:-hscode}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hscode-dev-password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./data/hscode_dump.sql:/docker-entrypoint-initdb.d/001-base.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  vectors:
+    <<: *app
+    command: ["hscode-build-vectors", "--threads", "${VECTOR_THREADS:-4}"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  app:
+    <<: *app
+    ports:
+      - "127.0.0.1:${HSCODE_PORT:-8765}:8765"
+    depends_on:
+      db:
+        condition: service_healthy
+      vectors:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  export:
+    <<: *app
+    profiles: ["tools"]
+    command: ["hscode-export", "--output-dir", "/exports"]
+    volumes:
+      - ./data:/exports
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: "no"
+
+volumes:
+  pgdata:
+  model_cache:

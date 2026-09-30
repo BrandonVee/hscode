@@ -1,0 +1,27 @@
+[project]
+name = "hscode"
+version = "0.1.0"
+description = "中国与美国海关商品编码查询 MCP 服务"
+readme = "README.md"
+authors = [
+    { name = "BrandonVee", email = "1970115881@qq.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "mcp[cli]>=2.0",
+    "psycopg[binary]>=3.1",
+    "jieba>=0.42",
+    "fastembed>=0.7",
+]
+
+[project.scripts]
+hscode = "hscode.server:main"
+hscode-build-vectors = "hscode.build_vectors:main"
+hscode-export = "hscode.export_database:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
