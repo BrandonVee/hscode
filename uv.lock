@@ -400,6 +400,7 @@ dependencies = [
     { name = "jieba" },
     { name = "mcp", extra = ["cli"] },
     { name = "psycopg", extra = ["binary"] },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -408,6 +409,7 @@ requires-dist = [
     { name = "jieba", specifier = ">=0.42" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
+    { name = "python-dotenv", specifier = ">=1.2" },
 ]
 
 [[package]]

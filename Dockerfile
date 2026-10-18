@@ -1,5 +1,5 @@
 FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
-FROM postgres:16-bookworm AS postgres-client
+FROM postgres:18-bookworm AS postgres-client
 
 FROM python:3.13-slim-bookworm AS builder
 COPY --from=uv /uv /usr/local/bin/uv
@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && useradd --create-home --uid 10001 hscode \
     && mkdir -p /cache/models /exports \
     && chown -R hscode:hscode /cache /exports
-COPY --from=postgres-client /usr/lib/postgresql/16/bin/pg_dump /usr/lib/postgresql/16/bin/pg_restore /usr/local/bin/
+COPY --from=postgres-client /usr/lib/postgresql/18/bin/pg_dump /usr/lib/postgresql/18/bin/pg_restore /usr/local/bin/
 COPY --from=builder /app/.venv /app/.venv
 RUN pg_dump --version && pg_restore --version
 WORKDIR /app

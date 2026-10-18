@@ -39,7 +39,7 @@
     例如 pgvector/pgvector:pg16。未生成向量时仍可使用全文检索。
 
 连接串走环境变量 HSCode_DSN，默认本机实例：
-    postgresql://hscode:hscode-dev-password@127.0.0.1:5435/hscode
+    运行目录 .env 中的 PG* 配置（可用 HSCode_DSN 覆盖）
 
 启动
 ----
@@ -61,6 +61,7 @@ import psycopg
 from psycopg.rows import dict_row
 from mcp.server.mcpserver import MCPServer
 from .config import DEFAULT_DSN
+from .logging_utils import configure_logging, logged_call, logger
 from .embeddings import load_model, vector_literal
 
 SERVER_NAME = "hscode"
@@ -797,6 +798,7 @@ def compare(code: str, source_country: str = "CN", target_country: str = "US",
 
 
 @mcp.tool()
+@logged_call("tool")
 def search_hs_code(
     keyword: str,
     country: Country = "CN",
@@ -826,6 +828,7 @@ def search_hs_code(
 
 
 @mcp.tool()
+@logged_call("tool")
 def get_hs_detail(code: str, country: Country = "CN") -> dict[str, Any]:
     """按编码查详情：品名、法定单位、所属章节层级与层级路径。
 
@@ -850,6 +853,7 @@ def get_hs_detail(code: str, country: Country = "CN") -> dict[str, Any]:
 
 
 @mcp.tool()
+@logged_call("tool")
 def list_chapter_codes(
     chapter: str,
     country: Country = "CN",
@@ -871,6 +875,7 @@ def list_chapter_codes(
 
 
 @mcp.tool()
+@logged_call("tool")
 def compare_across_countries(
     code: str,
     source_country: Country = "CN",
@@ -904,6 +909,7 @@ def compare_across_countries(
 
 
 @mcp.resource("hs://dataset-info")
+@logged_call("resource")
 def dataset_info() -> str:
     """数据版本与覆盖范围说明（供 AI 自查数据边界）。"""
     with connect() as conn:
@@ -972,6 +978,7 @@ def dataset_info() -> str:
 
 
 @mcp.resource("hs://chapters")
+@logged_call("resource")
 def chapters_resource() -> str:
     """中美两国章目录。"""
     with connect() as conn:
@@ -988,6 +995,7 @@ def chapters_resource() -> str:
 
 
 @mcp.prompt()
+@logged_call("prompt")
 def hs_classify(description: str, countries: str = "CN") -> str:
     """商品归类工作流提示词（拆解属性 → 定位章 → 检索候选 → 说明理由）。"""
     return (
@@ -1010,6 +1018,7 @@ def hs_classify(description: str, countries: str = "CN") -> str:
 
 
 @mcp.prompt()
+@logged_call("prompt")
 def hs_cross_market(code: str) -> str:
     """跨市场对照工作流提示词。"""
     return (
@@ -1037,7 +1046,13 @@ def main() -> None:
                     default=os.environ.get("MCP_STATELESS", "").lower() in {"1", "true"},
                     help="HTTP 无状态模式：请求不依赖 Mcp-Session-Id（服务重启后客户端"
                          "不会陷入 'unknown or expired session ID' 404 循环）")
+    ap.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    default=os.environ.get("HSCODE_LOG_LEVEL", "INFO").upper(),
+                    help="业务调用日志级别，默认 INFO")
     args = ap.parse_args()
+    configure_logging(args.log_level)
+    logger.info("event=startup version=%s transport=%s stateless=%s data_update=manual",
+                SERVER_VERSION, "http" if args.http else "stdio", args.stateless)
 
     if args.http:
         path = args.path if args.path.startswith("/") else "/" + args.path
