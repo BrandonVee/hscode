@@ -36,7 +36,7 @@ services:
 
   app:
     <<: *app
-    command: ["hscode", "--http", "${HSCODE_PORT:-8765}", "--host", "${HSCODE_BIND_HOST:-127.0.0.1}", "--stateless"]
+    command: ["hscode", "--http", "${HSCODE_PORT:-8765}", "--host", "${HSCODE_BIND_HOST:-0.0.0.0}", "--stateless"]
     environment:
       <<: *app-env
       HSCODE_PORT: ${HSCODE_PORT:-8765}

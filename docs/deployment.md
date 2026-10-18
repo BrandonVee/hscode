@@ -19,7 +19,7 @@ PGPORT=5432
 PGDATABASE=hscode
 PGUSER=hscode
 PGPASSWORD=填写实际数据库密码
-HSCODE_BIND_HOST=127.0.0.1
+HSCODE_BIND_HOST=0.0.0.0
 HSCODE_PORT=8765
 ```
 
@@ -46,7 +46,7 @@ docker compose ps
 docker compose logs --tail=100 app
 ```
 
-MCP 地址为 `http://127.0.0.1:8765/mcp/hscode`，协议为 Streamable HTTP。远程客户端直连时，将 `.env` 中 `HSCODE_BIND_HOST` 改为 `0.0.0.0`，重新执行启动命令，并配置服务器防火墙；使用反向代理时可以保留本机绑定，代理完整 `/mcp/hscode` 路径。
+MCP 地址为 `http://127.0.0.1:8765/mcp/hscode`，协议为 Streamable HTTP。默认监听 `0.0.0.0`，远程客户端使用 `http://服务器IP:8765/mcp/hscode`，并配置服务器防火墙；仅通过同机反向代理访问时可设置 `HSCODE_BIND_HOST=127.0.0.1`，代理完整 `/mcp/hscode` 路径。
 
 容器健康检查只验证 MCP 初始化。验证真实查询需在装有 uv 的环境运行：
 

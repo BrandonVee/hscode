@@ -55,7 +55,7 @@ docker compose up -d --build app
 Compose 使用 `network_mode: host`（Linux 宿主机网络），只启动应用；从项目 `.env` 注入数据库账号密码，通过 `PGHOST=127.0.0.1` 和 `PGPORT` 直接连接宿主机数据库。不需要共享 Docker 网络，也不做端口映射。数据库必须已就绪；`docker compose down` 不管理数据库。
 
 macOS / Windows 建议使用上文 `uv run hscode` 本机启动方式；Docker Desktop 的宿主机网络需自行启用相应支持。
-默认端口只绑定 `127.0.0.1`；远程直连时通过 `.env` 设置 `HSCODE_BIND_HOST=0.0.0.0`，重新创建应用。反向代理保留完整 `/mcp/hscode` 路径。
+Docker 部署默认监听 `0.0.0.0`，客户端可通过服务器 IP 直连；仅通过同机反向代理访问时可设置 `HSCODE_BIND_HOST=127.0.0.1`。反向代理保留完整 `/mcp/hscode` 路径。
 
 ```sh
 docker compose ps -a
