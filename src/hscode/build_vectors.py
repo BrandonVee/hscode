@@ -95,12 +95,14 @@ def build_vectors(dsn: str, *, batch_size: int = 64, threads: int = 4,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dsn", default=os.environ.get("HSCode_DSN", DEFAULT_DSN))
+    parser.add_argument("--dsn", default=DEFAULT_DSN)
     parser.add_argument("--batch-size", type=positive_int, default=64)
     parser.add_argument("--threads", type=positive_int, default=4)
     parser.add_argument("--rebuild", action="store_true", help="重新生成全部中国品名向量")
     parser.add_argument("--limit", type=positive_int, help="本次最多生成条数，用于分批验证")
     args = parser.parse_args()
+    if not args.dsn:
+        parser.error("请在 .env 设置 DATABASE_URL，或显式传入 --dsn")
     try:
         build_vectors(args.dsn, batch_size=args.batch_size, threads=args.threads,
                       rebuild=args.rebuild, limit=args.limit)

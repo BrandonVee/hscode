@@ -38,8 +38,7 @@
     基础导出不含向量字段或向量数据；生成向量需实例支持 pgvector，
     例如 pgvector/pgvector:pg16。未生成向量时仍可使用全文检索。
 
-连接串走环境变量 HSCode_DSN，默认本机实例：
-    运行目录 .env 中的 PG* 配置（可用 HSCode_DSN 覆盖）
+连接串来自运行目录 .env 或环境变量 DATABASE_URL。
 
 启动
 ----
@@ -69,7 +68,7 @@ SERVER_VERSION = "1.0.0"
 
 Country = Literal["CN", "US"]
 
-DSN = os.environ.get("HSCode_DSN", DEFAULT_DSN)
+DSN = DEFAULT_DSN
 
 DATA_NOTE = (
     "数据范围：中国为「2015 年基线全量 + 2016-2023 年变更记录」，"
@@ -95,6 +94,8 @@ mcp = MCPServer(
 
 def connect() -> psycopg.Connection:
     """连接到库（返回 dict 行）。"""
+    if not DSN:
+        raise ValueError("请在 .env 或环境变量中设置 DATABASE_URL")
     return psycopg.connect(DSN, row_factory=dict_row)
 
 

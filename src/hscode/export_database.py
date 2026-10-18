@@ -92,10 +92,12 @@ def export_database(dsn: str, output: Path, *, container: str | None = None) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dsn", default=os.environ.get("HSCode_DSN", DEFAULT_DSN))
+    parser.add_argument("--dsn", default=DEFAULT_DSN)
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
     parser.add_argument("--container", help="同一 PostgreSQL 实例的 Docker 容器名；省略时使用本机 PG 工具")
     args = parser.parse_args()
+    if not args.dsn:
+        parser.error("请在 .env 设置 DATABASE_URL，或显式传入 --dsn")
     export_database(args.dsn, args.output_dir, container=args.container)
 
 

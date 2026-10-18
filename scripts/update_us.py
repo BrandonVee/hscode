@@ -180,13 +180,15 @@ def restore(dsn: str, path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dsn", default=os.environ.get("HSCode_DSN", DEFAULT_DSN))
+    parser.add_argument("--dsn", default=DEFAULT_DSN)
     parser.add_argument("--apply", action="store_true", help="实际更新；默认只预览")
     parser.add_argument("--file", type=Path, help="人工下载的官方 JSON，须同时指定 --release")
     parser.add_argument("--release", help="人工核对的官方版本，如 '2026 Rev 21'")
     parser.add_argument("--backup-dir", type=Path, default=Path("backups/us"))
     parser.add_argument("--restore", type=Path, help="回滚至更新前快照，须同时指定 --apply")
     args = parser.parse_args()
+    if not args.dsn:
+        parser.error("请在 .env 设置 DATABASE_URL，或显式传入 --dsn")
     try:
         if args.restore:
             if not args.apply or args.file or args.release:

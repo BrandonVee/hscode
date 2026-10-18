@@ -11,7 +11,7 @@ Python MCP 服务，连接已有 PostgreSQL，提供中美海关编码检索、�
 ```sh
 cp .env.example .env   # 只在首次配置时执行，不要覆盖已有 .env
 chmod 600 .env
-# 编辑 .env，填写 PGHOST、PGPORT、PGDATABASE、PGUSER、PGPASSWORD
+# 编辑 .env，填写 DATABASE_URL
 ```
 
 `.env.example` 只提供无真实密码的配置模板；`.env` 保存实际配置，已排除在 Git 之外。程序仅加载当前运行目录的 `.env`，不读取用户目录里的其他项目配置。
@@ -41,7 +41,7 @@ uv run hscode                         # stdio
 uv run hscode --http 8765 --stateless  # HTTP
 ```
 
-从当前运行目录的 `.env` 读取 `PGHOST`、`PGPORT`、`PGDATABASE`、`PGUSER`、`PGPASSWORD`。显式设置的环境变量优先；`HSCode_DSN` 可覆盖连接串。请在项目根目录运行命令。
+从当前运行目录的 `.env` 读取单个 `DATABASE_URL`，显式环境变量优先。请在项目根目录运行命令。本机直接运行时，URL 主机填写 `127.0.0.1` 或实际数据库地址；Docker 访问宿主机时填写 `host.docker.internal`。密码含特殊字符时需 URL 编码。
 
 默认 MCP 地址：`http://127.0.0.1:8765/mcp/hscode`，协议为 Streamable HTTP。
 
@@ -52,9 +52,10 @@ uv run hscode --http 8765 --stateless  # HTTP
 docker compose up -d --build app
 ```
 
-Compose 使用 `network_mode: host`（Linux 宿主机网络），只启动应用；从项目 `.env` 注入数据库账号密码，通过 `PGHOST=127.0.0.1` 和 `PGPORT` 直接连接宿主机数据库。不需要共享 Docker 网络，也不做端口映射。数据库必须已就绪；`docker compose down` 不管理数据库。
+Compose 使用独立的 bridge 网络，只启动应用，通过项目 `.env` 的 `DATABASE_URL` 连接已有数据库。容器内部固定监听 `0.0.0.0:8765`，由 `HSCODE_BIND_HOST`、`HSCODE_PORT` 控制宿主机端口映射；无需外部共享网络。
 
-macOS / Windows 建议使用上文 `uv run hscode` 本机启动方式；Docker Desktop 的宿主机网络需自行启用相应支持。
+访问宿主机数据库时，URL 使用 `host.docker.internal`，Compose 为其设置 `host-gateway` 映射。数据库必须监听容器可达的宿主机地址，并允许该 Docker 网段连接；Linux 上仅监听 `127.0.0.1` 的数据库无法通过 bridge 网关访问。数据库也可以是外部服务器，直接填写实际 IP 或域名。`docker compose down` 不管理数据库。
+
 Docker 部署默认监听 `0.0.0.0`，客户端可通过服务器 IP 直连；仅通过同机反向代理访问时可设置 `HSCODE_BIND_HOST=127.0.0.1`。反向代理保留完整 `/mcp/hscode` 路径。
 
 ```sh
@@ -157,7 +158,7 @@ HSCODE_TEST_US_JSON=/path/hts_2026_revision_21_json.json uv run python -m unitte
 uv run hscode-export --container shared-postgres
 ```
 
-导出生成不含向量的 `data/hscode_dump.sql` 和 `data/hscode_dump.dump`，不修改源数据。导出过程需要创建临时数据库，普通应用账号默认无此权限；使用有 CREATEDB 权限的维护账号运行，通过 `HSCode_DSN` 指定连接。Docker 镜像内置 PostgreSQL 18 客户端工具。
+导出生成不含向量的 `data/hscode_dump.sql` 和 `data/hscode_dump.dump`，不修改源数据。导出过程需要创建临时数据库，普通应用账号默认无此权限；使用有 CREATEDB 权限的维护账号运行，通过 `DATABASE_URL` 指定连接。Docker 镜像内置 PostgreSQL 18 客户端工具。
 
 旧库清理迁移位于 `migrations/`，新导入库无需执行。`src/hscode/` 包含服务、模型配置、向量生成和导出逻辑；`scripts/smoke_test.py` 是部署后的 HTTP 冒烟验证。
 

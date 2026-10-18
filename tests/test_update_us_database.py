@@ -20,7 +20,7 @@ from scripts.update_us import COL_SQL, update, restore
 class DatabaseUpdateTests(unittest.TestCase):
     def test_update_idempotence_failure_rollback_and_restore(self):
         schema = 'test_hts_' + uuid.uuid4().hex
-        base = os.environ.get('HSCode_DSN', DEFAULT_DSN)
+        base = DEFAULT_DSN
         dsn = make_conninfo(base, options=f'-c search_path={schema},public')
         raw = Path(os.environ['HSCODE_TEST_US_JSON']).read_bytes()
         with psycopg.connect(base, autocommit=True) as admin:

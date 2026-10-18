@@ -14,18 +14,16 @@ chmod 600 .env
 编辑 `.env`，填写实际数据库账号及密码：
 
 ```dotenv
-PGHOST=127.0.0.1
-PGPORT=5432
-PGDATABASE=hscode
-PGUSER=hscode
-PGPASSWORD=填写实际数据库密码
+DATABASE_URL=postgresql://hscode:填写URL编码后的密码@host.docker.internal:5432/hscode
 HSCODE_BIND_HOST=0.0.0.0
 HSCODE_PORT=8765
 ```
 
-Compose 使用 `network_mode: host`，应用直接使用宿主机网络。`PGHOST=127.0.0.1`、`PGPORT=5432` 即连接服务器本机数据库；外部数据库填写实际 IP 或域名。不需要配置 Docker 网络名或端口映射，监听地址和端口直接由 `HSCODE_BIND_HOST`、`HSCODE_PORT` 控制。程序不会读取开发机器的其他配置文件。
+Compose 使用 bridge 网络，容器内部固定监听 `0.0.0.0:8765`；通过 `HSCODE_BIND_HOST`、`HSCODE_PORT` 将端口发布到宿主机。数据库统一由单个 `DATABASE_URL` 指定，不配置 `PGHOST` 等单独字段，也不读取用户目录中的其他配置。
 
-该部署方式面向 Linux。macOS / Windows 本地开发推荐 `uv run hscode`，Docker Desktop 如需使用宿主机网络，应先启用对应支持。
+数据库在宿主机时使用 `host.docker.internal`，Compose 已配置 `host-gateway` 映射。Linux 上数据库必须监听容器可达的宿主机地址，并在 `pg_hba.conf` / 防火墙允许应用的 Docker 网段；若数据库仅绑定 `127.0.0.1`，bridge 容器无法连接。数据库为已有容器时，也需将数据库端口发布到应用可达的宿主机地址。外部数据库则直接填写实际域名或 IP。
+
+本机不用 Docker 直接启动时，将 URL 主机改为 `127.0.0.1` 或实际地址。密码中的 `@`、`:`、`/`、`#` 等字符需 URL 编码，实际 `.env` 可以用单引号包住整个 URL，避免 `$` 被插值。
 
 请管理员预先创建 `hscode` 数据库及专用账号，并在**空库**导入仓库的 `data/hscode_dump.sql`。例如数据库恰好是本机 Docker 容器 `shared-postgres`、管理员为 `postgres` 时：
 
