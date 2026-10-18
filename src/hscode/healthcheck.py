@@ -11,7 +11,8 @@ def main() -> None:
         "params": {"protocolVersion": "2025-03-26", "capabilities": {},
                    "clientInfo": {"name": "healthcheck", "version": "1.0"}},
     }).encode()
-    request = Request("http://127.0.0.1:8765" + path, data=body, headers={
+    port = int(os.environ.get("HSCODE_PORT", "8765"))
+    request = Request(f"http://127.0.0.1:{port}" + path, data=body, headers={
         "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
     })
     with urlopen(request, timeout=8) as response:

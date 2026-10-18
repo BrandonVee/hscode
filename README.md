@@ -52,8 +52,9 @@ uv run hscode --http 8765 --stateless  # HTTP
 docker compose up -d --build app
 ```
 
-Compose 只启动应用，从项目 `.env` 注入数据库账号密码。`HSCODE_DOCKER_DB_HOST` 指定容器可访问的数据库地址（默认 `shared-postgres`），`HSCODE_DOCKER_NETWORK` 指定已有网络（默认 `shared-infra`），端口使用 `PGPORT`。容器内不能用 `127.0.0.1` 连接宿主机数据库。数据库和网络必须已就绪；`docker compose down` 只停止本项目容器，不管理共享数据库。
+Compose 使用 `network_mode: host`（Linux 宿主机网络），只启动应用；从项目 `.env` 注入数据库账号密码，通过 `PGHOST=127.0.0.1` 和 `PGPORT` 直接连接宿主机数据库。不需要共享 Docker 网络，也不做端口映射。数据库必须已就绪；`docker compose down` 不管理数据库。
 
+macOS / Windows 建议使用上文 `uv run hscode` 本机启动方式；Docker Desktop 的宿主机网络需自行启用相应支持。
 默认端口只绑定 `127.0.0.1`；远程直连时通过 `.env` 设置 `HSCODE_BIND_HOST=0.0.0.0`，重新创建应用。反向代理保留完整 `/mcp/hscode` 路径。
 
 ```sh

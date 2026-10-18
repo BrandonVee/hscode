@@ -1,6 +1,6 @@
 # 服务端部署
 
-项目使用已有 PostgreSQL，应用只读取固定数据快照，不自动更新数据。以下步骤使用 Docker Compose，需要服务器已有数据库及可供应用加入的 Docker 网络。
+项目使用已有 PostgreSQL，应用只读取固定数据快照，不自动更新数据。以下步骤使用 Docker Compose，面向 Linux 服务端，需要服务器已有 PostgreSQL（原生运行或已发布到宿主机端口的容器均可）。
 
 ## 首次部署
 
@@ -19,13 +19,13 @@ PGPORT=5432
 PGDATABASE=hscode
 PGUSER=hscode
 PGPASSWORD=填写实际数据库密码
-HSCODE_DOCKER_DB_HOST=shared-postgres
-HSCODE_DOCKER_NETWORK=shared-infra
 HSCODE_BIND_HOST=127.0.0.1
 HSCODE_PORT=8765
 ```
 
-`PGHOST` 供本机直接运行使用，Docker 使用 `HSCODE_DOCKER_DB_HOST`；数据库端口均由 `PGPORT` 提供。如果数据库在外部服务器，Docker 地址填实际可达的域名或 IP。网络名、容器名是可修改的示例，必须与服务器实际配置一致。程序不会去读取开发机器的任何配置文件。
+Compose 使用 `network_mode: host`，应用直接使用宿主机网络。`PGHOST=127.0.0.1`、`PGPORT=5432` 即连接服务器本机数据库；外部数据库填写实际 IP 或域名。不需要配置 Docker 网络名或端口映射，监听地址和端口直接由 `HSCODE_BIND_HOST`、`HSCODE_PORT` 控制。程序不会读取开发机器的其他配置文件。
+
+该部署方式面向 Linux。macOS / Windows 本地开发推荐 `uv run hscode`，Docker Desktop 如需使用宿主机网络，应先启用对应支持。
 
 请管理员预先创建 `hscode` 数据库及专用账号，并在**空库**导入仓库的 `data/hscode_dump.sql`。例如数据库恰好是本机 Docker 容器 `shared-postgres`、管理员为 `postgres` 时：
 

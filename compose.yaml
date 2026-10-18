@@ -8,9 +8,9 @@ x-app: &app
       PYPI_INDEX_URL: ${PYPI_INDEX_URL:-https://pypi.org/simple}
       DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://deb.debian.org/debian}
       DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
-  networks: [shared]
-  environment:
-    PGHOST: ${HSCODE_DOCKER_DB_HOST:-shared-postgres}
+  network_mode: host
+  environment: &app-env
+    PGHOST: ${PGHOST:-127.0.0.1}
     PGPORT: ${PGPORT:-5432}
     PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
     PGUSER: ${PGUSER:?Set PGUSER in .env}
@@ -36,8 +36,10 @@ services:
 
   app:
     <<: *app
-    ports:
-      - "${HSCODE_BIND_HOST:-127.0.0.1}:${HSCODE_PORT:-8765}:8765"
+    command: ["hscode", "--http", "${HSCODE_PORT:-8765}", "--host", "${HSCODE_BIND_HOST:-127.0.0.1}", "--stateless"]
+    environment:
+      <<: *app-env
+      HSCODE_PORT: ${HSCODE_PORT:-8765}
     restart: unless-stopped
 
   export:
@@ -52,8 +54,3 @@ services:
 
 volumes:
   model_cache:
-
-networks:
-  shared:
-    external: true
-    name: ${HSCODE_DOCKER_NETWORK:-shared-infra}
