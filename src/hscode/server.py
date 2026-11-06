@@ -56,12 +56,13 @@ import re
 import sys
 from typing import Any, Literal
 
-import psycopg
-from psycopg.rows import dict_row
+from sqlalchemy.orm import Session
 from mcp.server.mcpserver import MCPServer
 from .config import DEFAULT_DSN
 from .logging_utils import configure_logging, logged_call, logger
-from .embeddings import load_model, vector_literal
+from .embeddings import load_model, vector_values
+from .database import session
+from . import repository
 
 SERVER_NAME = "hscode"
 SERVER_VERSION = "1.0.0"
@@ -92,11 +93,9 @@ mcp = MCPServer(
 # --------------------------------------------------------------------------- #
 
 
-def connect() -> psycopg.Connection:
-    """连接到库（返回 dict 行）。"""
-    if not DSN:
-        raise ValueError("请在 .env 或环境变量中设置 DATABASE_URL")
-    return psycopg.connect(DSN, row_factory=dict_row)
+def connect() -> Session:
+    """创建使用项目连接池的 ORM Session。"""
+    return session(DSN)
 
 
 _PUNCT = re.compile(r"^[\W_]+$", re.UNICODE)
@@ -168,11 +167,10 @@ def embed_model():
 
 
 def vector_recall(
-    conn: psycopg.Connection,
+    conn: Session,
     keyword: str,
     country: str,
-    chap_clause: str,
-    chap_params: tuple,
+    chapter: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     """语义召回：把查询和品名各自编码成向量，按余弦距离取最近邻。
@@ -184,33 +182,13 @@ def vector_recall(
     """
     if country != "CN":
         return []
-    ready = conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
-        "WHERE attrelid='hs_code'::regclass AND attname='embedding' AND NOT attisdropped) AS ready"
-    ).fetchone()["ready"]
-    if not ready:
-        return []
-    complete = conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM hs_code WHERE country='CN') "
-        "AND NOT EXISTS (SELECT 1 FROM hs_code WHERE country='CN' AND embedding IS NULL) AS ready"
-    ).fetchone()["ready"]
-    if not complete or not embed_model():
+    if not repository.vector_ready(conn) or not embed_model():
         return []
     try:
-        vec = next(iter(embed_model().embed([keyword])))
-        literal = vector_literal(vec)
+        vec = vector_values(next(iter(embed_model().embed([keyword]))))
     except Exception:
         return []
-    rows = conn.execute(
-        f"""
-        SELECT {_SELECT_COLS}, 1 - (embedding <=> %s::vector) AS similarity
-        FROM hs_code
-        WHERE country = %s AND embedding IS NOT NULL {chap_clause}
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-        """,
-        (literal, country, *chap_params, literal, limit),
-    ).fetchall()
+    rows = repository.vector_neighbors(conn, vec, limit, chapter)
     for r in rows:
         r["hit_count"] = 1
     return rows
@@ -219,7 +197,7 @@ def vector_recall(
 _idf_cache: dict[tuple[str, str], dict[str, float]] = {}
 
 
-def idf_map(country: str, vec_col: str = "search_vec") -> dict[str, float]:
+def idf_map(country: str, vec_col: str = "search_vec", conn: Session | None = None) -> dict[str, float]:
     """tok → 逆文档频率，进程内缓存（数据静态，全表扫一次即可）。
 
     Postgres 的 ts_rank 只看词频与位置，不含 IDF，所以同词命中会全部同分，
@@ -235,15 +213,11 @@ def idf_map(country: str, vec_col: str = "search_vec") -> dict[str, float]:
     key = (country, vec_col)
     if key in _idf_cache:
         return _idf_cache[key]
-    # ts_stat 收的是一段 SQL 文本，无法用占位符带 country，故先校验再拼
-    with connect() as conn:
-        total = conn.execute(
-            "SELECT count(*) AS n FROM hs_code WHERE country = %s", (country,)
-        ).fetchone()["n"]
-        rows = conn.execute(
-            "SELECT word, ndoc FROM ts_stat(%s)",
-            (f"SELECT {vec_col} FROM hs_code WHERE country = '{country}'",),
-        ).fetchall()
+    if conn is not None:
+        total, rows = repository.word_stats(conn, country, vec_col)
+    else:
+        with connect() as connection:
+            total, rows = repository.word_stats(connection, country, vec_col)
     cache = {r["word"]: math.log(1 + max(total, 1) / (1 + r["ndoc"])) for r in rows}
     _idf_cache[key] = cache
     return cache
@@ -281,27 +255,9 @@ def normalize_code(raw: str, country: str) -> str | None:
     return digits if len(digits) in valid else None
 
 
-_SELECT_COLS = """
-    country, code, code_display, code_len, description, description_en,
-    unit1, unit2, hs2, hs4, hs6, hs8, indent, path_desc, is_declarable
-"""
-
-# 向量 → 文本搜索配置。关键区别是 english 带 snowball 词干提取：
-# 'flasks' 会被归一到 'flask'，否则搜 "vacuum flask" 命中不了 "vacuum flasks"。
-# 中文档必须用 simple（english 配置会把中文整段丢掉）。
-_VECTOR_CFG = {"search_vec_en": "english"}
-
-
-def _cfg(vec_col: str) -> str:
-    return _VECTOR_CFG.get(vec_col, "simple")
-
-
-def _chapter_map(conn: psycopg.Connection, country: str) -> dict[str, str]:
+def _chapter_map(conn: Session, country: str) -> dict[str, str]:
     """取该国的章标题（数据自带，见 hs_chapter 表）。"""
-    rows = conn.execute(
-        "SELECT chapter, title FROM hs_chapter WHERE country = %s", (country,)
-    ).fetchall()
-    return {r["chapter"]: r["title"] for r in rows}
+    return {row["chapter"]: row["title"] for row in repository.chapters(conn, country)}
 
 
 def _placeholder_desc(desc: str) -> bool:
@@ -315,7 +271,7 @@ def _placeholder_desc(desc: str) -> bool:
     return tok in {"other", "parts", "nes", "nesoi", "other nesoi"}
 
 
-def _cn_anchors(conn: psycopg.Connection, keyword: str, limit: int) -> list[str]:
+def _cn_anchors(conn: Session, keyword: str, limit: int) -> list[str]:
     """用中文关键词在中国数据里定位 HS6 锚点，按相关度返回去重后的 HS6 列表。
 
     单独抽出来，避免在 search() 里递归调用自己（原先 US 分支直接 call search(CN)）。
@@ -323,30 +279,9 @@ def _cn_anchors(conn: psycopg.Connection, keyword: str, limit: int) -> list[str]
     tokens = [t for t in (_sanitize_token(t) for t in tokenize_cn(keyword)) if t]
     if not tokens:
         return []
-    tsq = " & ".join(tokens)
-    cfg = _cfg("search_vec")
-    rows = conn.execute(
-        """
-        SELECT hs6, code, description, search_tokens
-        FROM hs_code
-        WHERE country = 'CN' AND search_vec @@ to_tsquery(%s, %s)
-        ORDER BY ts_rank(search_vec, to_tsquery(%s, %s)) DESC, code
-        LIMIT %s
-        """,
-        (cfg, tsq, cfg, tsq, limit * 5),
-    ).fetchall()
-    if not rows:  # AND 无果放宽为 OR，否则「宠物食品」这类口语表达直接查不到
-        tsq = " | ".join(tokens)
-        rows = conn.execute(
-            """
-            SELECT hs6, code, description, search_tokens
-            FROM hs_code
-            WHERE country = 'CN' AND search_vec @@ to_tsquery(%s, %s)
-            ORDER BY ts_rank(search_vec, to_tsquery(%s, %s)) DESC, code
-            LIMIT %s
-            """,
-            (cfg, tsq, cfg, tsq, limit * 5),
-        ).fetchall()
+    rows = repository.anchor_candidates(conn, " & ".join(tokens), limit * 5)
+    if not rows:  # AND 无果放宽为 OR
+        rows = repository.anchor_candidates(conn, " | ".join(tokens), limit * 5)
 
     # 重排：命中词数 > 品名长度。只看 ts_rank 会把长描述（带一堆限定语）排到前面，
     # 而它的 HS6 未必是用户想要的锚点（搜「保温瓶」时玻璃胆那行会压过保温瓶本体）。
@@ -363,7 +298,7 @@ def _cn_anchors(conn: psycopg.Connection, keyword: str, limit: int) -> list[str]
 
 
 def attach_zh(
-    conn: psycopg.Connection, rows: list[dict[str, Any]], country: str
+    conn: Session, rows: list[dict[str, Any]], country: str
 ) -> list[dict[str, Any]]:
     """给美国条目挂中文别名（zh_hint）。
 
@@ -381,13 +316,7 @@ def attach_zh(
     anchors = sorted({r["hs6"] for r in rows if r.get("hs6")})
     if not anchors:
         return rows
-    cn_rows = conn.execute(
-        """
-        SELECT hs6, code, description FROM hs_code
-        WHERE country = 'CN' AND hs6 = ANY(%s) ORDER BY hs6, code
-        """,
-        (anchors,),
-    ).fetchall()
+    cn_rows = repository.chinese_hints(conn, anchors)
     by_hs6: dict[str, list[str]] = {}
     for r in cn_rows:
         by_hs6.setdefault(r["hs6"], []).append(r["description"])
@@ -446,12 +375,11 @@ def _rank(rows: list[dict[str, Any]], tokens: list[str]) -> list[dict[str, Any]]
 
 
 def _or_candidates(
-    conn: psycopg.Connection,
+    conn: Session,
     tokens: list[str],
     vec_col: str,
     country: str,
-    chap_clause: str,
-    chap_params: tuple,
+    chapter: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     """OR 检索：按 token 稀有度逐词取候选，再按 IDF 之和排序。
@@ -460,8 +388,7 @@ def _or_candidates(
     高频词（不锈钢，数百行同分）会把低频词（保温）的候选挤出窗口，
     导致「不锈钢保温杯」只返回不锈钢。逐词取候选可保证每个词都有代表进入候选集。
     """
-    idf = idf_map(country, vec_col)
-    cfg = _cfg(vec_col)
+    idf = idf_map(country, vec_col, conn)
     # 命中判定要用与向量对应的原文：英文向量不能再看中文分词列
     if vec_col == "search_vec_en":
         def row_tokens(r: dict[str, Any]) -> set[str]:
@@ -471,31 +398,12 @@ def _or_candidates(
             return set((r.get("_tokens") or "").split())
 
     if not idf:
-        tsq = " | ".join(tokens)
-        sql = f"""
-            SELECT {_SELECT_COLS}, search_tokens AS _tokens,
-                   ts_rank({vec_col}, to_tsquery(%s, %s)) AS _rank
-            FROM hs_code
-            WHERE country = %s AND {vec_col} @@ to_tsquery(%s, %s) {chap_clause}
-            ORDER BY _rank DESC LIMIT %s
-        """
-        rows = conn.execute(
-            sql, (cfg, tsq, country, cfg, tsq, *chap_params, limit * 5)
-        ).fetchall()
+        rows = repository.full_text(conn, country, vec_col, " | ".join(tokens), limit * 5, chapter)
         return _rank(rows, tokens)
 
     by_code: dict[str, dict[str, Any]] = {}
     for tok in sorted(tokens, key=lambda t: -idf.get(t, 0.0)):
-        sql = f"""
-            SELECT {_SELECT_COLS}, search_tokens AS _tokens
-            FROM hs_code
-            WHERE country = %s AND {vec_col} @@ plainto_tsquery(%s, %s)
-              {chap_clause}
-            ORDER BY length(description) LIMIT %s
-        """
-        for row in conn.execute(
-            sql, (country, cfg, tok, *chap_params, limit * 3)
-        ).fetchall():
+        for row in repository.token_candidates(conn, country, vec_col, tok, limit * 3, chapter):
             by_code.setdefault(row["code"], row)
 
     if not by_code:
@@ -557,8 +465,7 @@ def search(
     tokens = [t for t in (_sanitize_token(t) for t in tokenize(keyword, country)) if t]
     en_tokens = ([t for t in (_sanitize_token(t) for t in tokenize_en(keyword)) if t]
                  if country == "CN" and re.search(r"[a-z]", keyword.lower()) else [])
-    chap_clause = " AND hs2 = %s" if chapter else ""
-    chap_params: tuple = (re.sub(r"\D", "", chapter).zfill(2),) if chapter else ()
+    chapter_filter = re.sub(r"\D", "", chapter).zfill(2) if chapter else None
 
     results: list[dict[str, Any]] = []
     match = "none"
@@ -575,21 +482,7 @@ def search(
                 tsq = joiner.join(tk)
                 if not tsq:
                     continue
-                sql = f"""
-                    SELECT {_SELECT_COLS}, search_tokens AS _tokens,
-                           ts_rank({vec_col}, to_tsquery(%s, %s)) AS _rank
-                    FROM hs_code
-                    WHERE country = %s AND {vec_col} @@ to_tsquery(%s, %s)
-                      {chap_clause}
-                    -- ts_rank 经常同分（都命中同一个词），加一道长度做稳定排序：
-                    -- 短品名通常更精确，也让「Frozen lobsters」压过一堆限定语的长句
-                    ORDER BY _rank DESC, length(coalesce(description_en, description))
-                    LIMIT %s
-                """
-                cfg = _cfg(vec_col)
-                rows = conn.execute(
-                    sql, (cfg, tsq, country, cfg, tsq, *chap_params, limit * 5)
-                ).fetchall()
+                rows = repository.full_text(conn, country, vec_col, tsq, limit * 5, chapter_filter)
                 if rows:
                     results = _rank(rows, tk)
                     match = mode
@@ -597,7 +490,7 @@ def search(
 
         # 语义召回档：AND 都没命中说明字面不匹配，交给向量找语义相近的条目
         if not results:
-            rows = vector_recall(conn, keyword, country, chap_clause, chap_params, limit)
+            rows = vector_recall(conn, keyword, country, chapter_filter, limit)
             if rows:
                 results = rows
                 match = "vector"
@@ -612,7 +505,7 @@ def search(
                 or_rungs.append(("fts_or_en", "search_vec_en", en_tokens))
             for mode, vec_col, tk in or_rungs:
                 rows = _or_candidates(conn, tk, vec_col, country,
-                                      chap_clause, chap_params, limit)
+                                      chapter_filter, limit)
                 if rows:
                     results = rows
                     match = mode
@@ -623,13 +516,7 @@ def search(
         if not results and country == "US" and re.search(r"[\u4e00-\u9fff]", keyword):
             anchors = _cn_anchors(conn, keyword, limit)
             if anchors:
-                sql = f"""
-                    SELECT {_SELECT_COLS}, search_tokens AS _tokens, 0::float4 AS _rank
-                    FROM hs_code
-                    WHERE country = 'US' AND hs6 = ANY(%s) {chap_clause}
-                    ORDER BY code_len, code LIMIT %s
-                """
-                rows = conn.execute(sql, (anchors, *chap_params, limit * 5)).fetchall()
+                rows = repository.by_anchors(conn, "US", anchors, limit * 5, chapter_filter)
                 if rows:
                     pos = {a: i for i, a in enumerate(anchors)}
                     rows.sort(key=lambda r: (pos.get(r["hs6"], 999),
@@ -644,16 +531,7 @@ def search(
 
         # 兜底：整串子串匹配（走 pg_trgm 索引）
         if not results:
-            sql = f"""
-                SELECT {_SELECT_COLS}, search_tokens AS _tokens, 0::float4 AS _rank
-                FROM hs_code
-                WHERE country = %s
-                  AND (description ILIKE %s OR description_en ILIKE %s)
-                  {chap_clause}
-                LIMIT %s
-            """
-            like = f"%{keyword}%"
-            rows = conn.execute(sql, (country, like, like, *chap_params, limit * 5)).fetchall()
+            rows = repository.substring(conn, country, keyword, limit * 5, chapter_filter)
             if rows:
                 results = _rank(rows, tokens or [keyword.lower()])
                 match = "like"
@@ -685,10 +563,7 @@ def get_detail(code: str, country: str = "CN") -> dict[str, Any] | None:
     if not norm:
         return None
     with connect() as conn:
-        row = conn.execute(
-            f"SELECT {_SELECT_COLS} FROM hs_code WHERE country = %s AND code = %s",
-            (country, norm),
-        ).fetchone()
+        row = repository.detail(conn, country, norm)
         if not row:
             return None
 
@@ -713,25 +588,10 @@ def list_chapter(
     """列出某章（可再按品目收窄）下的编码。"""
     ch = re.sub(r"\D", "", str(chapter or "")).zfill(2)
     limit = max(1, min(int(limit or 50), 200))
-    clauses = ["country = %s", "hs2 = %s"]
-    params: list[Any] = [country, ch]
-    if heading:
-        clauses.append("hs4 = %s")
-        params.append(re.sub(r"\D", "", heading).zfill(4))
+    heading_filter = re.sub(r"\D", "", heading).zfill(4) if heading else None
 
     with connect() as conn:
-        total = conn.execute(
-            f"SELECT count(*) AS n FROM hs_code WHERE {' AND '.join(clauses)}", params
-        ).fetchone()["n"]
-        rows = conn.execute(
-            f"""
-            SELECT code, code_display, code_len, description, description_en,
-                   unit1, unit2, hs4, hs6, path_desc, is_declarable
-            FROM hs_code WHERE {' AND '.join(clauses)}
-            ORDER BY code LIMIT %s
-            """,
-            (*params, limit),
-        ).fetchall()
+        total, rows = repository.chapter_codes(conn, country, ch, heading_filter, limit)
         title = _chapter_map(conn, country).get(ch, f"Chapter {ch}")
 
         for row in rows:
@@ -760,14 +620,7 @@ def compare(code: str, source_country: str = "CN", target_country: str = "US",
     limit = max(1, min(int(limit or 20), 50))
 
     with connect() as conn:
-        targets = conn.execute(
-            f"""
-            SELECT {_SELECT_COLS} FROM hs_code
-            WHERE country = %s AND hs6 = %s
-            ORDER BY code_len, code LIMIT %s
-            """,
-            (target_country, anchor, limit),
-        ).fetchall()
+        targets = repository.by_anchors(conn, target_country, [anchor], limit)
         titles = _chapter_map(conn, target_country)
 
         for t in targets:
@@ -914,25 +767,7 @@ def compare_across_countries(
 def dataset_info() -> str:
     """数据版本与覆盖范围说明（供 AI 自查数据边界）。"""
     with connect() as conn:
-        counts = {
-            r["country"]: r["n"] for r in conn.execute(
-                "SELECT country, count(*) AS n FROM hs_code GROUP BY country"
-            ).fetchall()
-        }
-        releases = {
-            r["country"]: r for r in conn.execute(
-                "SELECT country, system, release, source_url, record_count, imported_at "
-                "FROM data_release"
-            ).fetchall()
-        }
-        # 质量数字现算，避免写死后和库里实际状态脱节
-        quality = conn.execute(
-            """
-            SELECT count(*) FILTER (WHERE description LIKE '%?%')    AS bad_desc,
-                   count(*) FILTER (WHERE description_en LIKE '%?%') AS bad_en
-            FROM hs_code WHERE country = 'CN'
-            """
-        ).fetchone()
+        counts, releases, quality = repository.dataset_summary(conn)
 
     def rel(country: str, key: str):
         return (releases.get(country) or {}).get(key)
@@ -983,10 +818,7 @@ def dataset_info() -> str:
 def chapters_resource() -> str:
     """中美两国章目录。"""
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT country, chapter, title, code_count FROM hs_chapter "
-            "ORDER BY country, chapter"
-        ).fetchall()
+        rows = repository.chapters(conn)
     return json.dumps(rows, ensure_ascii=False, indent=2)
 
 

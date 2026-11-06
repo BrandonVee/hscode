@@ -1,6 +1,6 @@
 # 海关编码查询 MCP
 
-Python MCP 服务，连接已有 PostgreSQL，提供中美海关编码检索、详情、按章浏览和 HS6 对照。项目不再启动独立数据库。
+Python MCP 服务，通过 SQLAlchemy ORM 连接已有 PostgreSQL，提供中美海关编码检索、详情、按章浏览和 HS6 对照。项目不再启动独立数据库。
 
 数据库表结构、逐字段含义、关联和索引详见 [数据库数据字典](docs/database.md)；服务端部署见 [部署说明](docs/deployment.md)。
 
@@ -134,7 +134,7 @@ uv run python scripts/smoke_test.py --allow-no-vectors
 
 导入仅涉及美国编码、章节计数和版本元数据，中国数据保持不变。无编码的层级描述仍用于生成祖先路径；不导入税率、附加税和脚注。程序检查重复编码、编码位数、章节覆盖及数据量变化，拒绝版本降级；章节变化或总量变化超过 20% 时需人工核对。
 
-写入前保留 `backups/us/` 下的美国回滚快照、官方原始 JSON 和 SHA-256 差异报告，该目录不提交 Git。暂存和替换在单一数据库事务中完成，失败自动回滚；同一版本且内容相同时不重复写入。需要回滚时人工执行：
+写入前保留 `backups/us/` 下的美国回滚快照、官方原始 JSON 和 SHA-256 差异报告，该目录不提交 Git。删除和 ORM 批量写入在单一数据库事务中完成，失败自动回滚；同一版本且内容相同时不重复写入。需要回滚时人工执行：
 
 ```sh
 uv run python scripts/update_us.py --restore backups/us/us-时间-before.json --apply
@@ -147,6 +147,8 @@ uv run python scripts/update_us.py --restore backups/us/us-时间-before.json --
 
 ```sh
 uv run python -m unittest discover -s tests -v
+# ORM 查询、更新及失败回滚集成测试，在独立临时 schema 中使用少量测试数据
+HSCODE_TEST_DATABASE=1 uv run python -m unittest discover -s tests -v
 # 可选：真实 PostgreSQL 集成测试，在独立临时 schema 内执行并清理
 HSCODE_TEST_US_JSON=/path/hts_2026_revision_21_json.json uv run python -m unittest discover -s tests -v
 ```

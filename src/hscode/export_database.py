@@ -8,11 +8,28 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-import psycopg
-from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from sqlalchemy import MetaData, Table, func, inspect, select
 
 from .config import DEFAULT_DSN
+from .database import make_engine
+from .postgres import create_database, drop_database, remove_vector_schema
+
+
+def export_columns(connection) -> list[str]:
+    """反射实际字段，排除数据库生成列和可选语义向量。"""
+    return [column["name"] for column in inspect(connection).get_columns("hs_code")
+            if not column.get("computed") and column["name"] != "embedding"]
+
+
+def copy_base_codes(source, stage) -> None:
+    """在源快照中分批读取、写入基础数据，不加载整表到内存。"""
+    names = export_columns(source)
+    table = Table("hs_code", MetaData(), autoload_with=source)
+    statement = select(*(table.c[name] for name in names)).execution_options(yield_per=1000)
+    with source.execute(statement) as result:
+        for batch in result.mappings().partitions(1000):
+            stage.execute(table.insert(), [dict(row) for row in batch])
 
 
 def run_pg(tool: str, args: list[str], dsn: str, *, database: str,
@@ -38,56 +55,60 @@ def export_database(dsn: str, output: Path, *, container: str | None = None) -> 
     stage_name = "hscode_export_" + uuid.uuid4().hex[:12]
     stage_dsn = make_conninfo(dsn, dbname=stage_name)
     output.mkdir(parents=True, exist_ok=True)
-    with psycopg.connect(dsn, autocommit=True) as admin:
-        admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(stage_name)))
-        try:
-            with tempfile.TemporaryDirectory(prefix="hscode_export_") as directory:
-                work = Path(directory)
-                with psycopg.connect(dsn) as source:
-                    source.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                    snapshot = source.execute("SELECT pg_export_snapshot()").fetchone()[0]
-                    with (work / "schema.dump").open("wb") as handle:
-                        run_pg("pg_dump", ["--format=custom", "--no-owner", "--no-privileges",
-                               "--exclude-table-data=public.hs_code", f"--snapshot={snapshot}"],
-                               dsn, database=source.info.dbname, container=container, stdout=handle)
-                    with (work / "schema.dump").open("rb") as handle:
-                        run_pg("pg_restore", ["--dbname=" + stage_name, "--exit-on-error",
-                               "--no-owner", "--no-privileges"], dsn, database=stage_name,
-                               container=container, stdin=handle)
-                    columns = [row[0] for row in source.execute(
-                        "SELECT attname FROM pg_attribute WHERE attrelid='hs_code'::regclass "
-                        "AND attnum > 0 AND NOT attisdropped AND attgenerated = '' "
-                        "AND attname <> 'embedding' ORDER BY attnum"
-                    ).fetchall()]
-                    column_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
-                    # 在同一快照中读取基础数据，源库的现有向量不发生变动。
-                    with psycopg.connect(stage_dsn) as stage:
-                        stage.execute("ALTER TABLE hs_code DROP COLUMN IF EXISTS embedding")
-                        stage.execute("DROP EXTENSION IF EXISTS vector")
-                        with source.cursor().copy(sql.SQL("COPY hs_code ({}) TO STDOUT").format(column_sql)) as reader:
-                            with stage.cursor().copy(sql.SQL("COPY hs_code ({}) FROM STDIN").format(column_sql)) as writer:
-                                for block in reader:
-                                    writer.write(block)
-                # 两种格式都成功生成后，才替换输出文件。
-                for name, format_name in (("hscode_dump.sql", "plain"), ("hscode_dump.dump", "custom")):
-                    with (work / name).open("wb") as handle:
-                        run_pg("pg_dump", [f"--format={format_name}", "--no-owner", "--no-privileges"],
-                               dsn, database=stage_name, container=container, stdout=handle)
-                for name in ("hscode_dump.sql", "hscode_dump.dump"):
-                    with tempfile.NamedTemporaryFile(dir=output, delete=False) as handle:
-                        pending = Path(handle.name)
-                        try:
-                            with (work / name).open("rb") as source_file:
-                                shutil.copyfileobj(source_file, handle)
-                        except BaseException:
-                            pending.unlink(missing_ok=True)
-                            raise
-                    # PostgreSQL 初始化进程使用独立用户，需要能够读取基础导出。
-                    pending.chmod(0o644)
-                    pending.replace(output / name)
-                print(f"已导出基础数据：{output / 'hscode_dump.sql'}、{output / 'hscode_dump.dump'}")
-        finally:
-            admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(stage_name)))
+    engine = make_engine(dsn)
+    stage_engine = make_engine(stage_dsn)
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as admin:
+            create_database(admin, stage_name)
+            try:
+                _export_database(engine, stage_engine, dsn, stage_name, output, container)
+            finally:
+                stage_engine.dispose()
+                drop_database(admin, stage_name)
+    finally:
+        stage_engine.dispose()
+        engine.dispose()
+
+
+def _export_database(engine, stage_engine, dsn: str, stage_name: str,
+                     output: Path, container: str | None) -> None:
+    with tempfile.TemporaryDirectory(prefix="hscode_export_") as directory:
+        work = Path(directory)
+        with engine.connect().execution_options(
+            isolation_level="REPEATABLE READ", postgresql_readonly=True,
+        ) as source, source.begin():
+            snapshot = source.scalar(select(func.pg_export_snapshot()))
+            database = source.scalar(select(func.current_database()))
+            with (work / "schema.dump").open("wb") as handle:
+                run_pg("pg_dump", ["--format=custom", "--no-owner", "--no-privileges",
+                       "--exclude-table-data=public.hs_code", f"--snapshot={snapshot}"],
+                       dsn, database=database, container=container, stdout=handle)
+            with (work / "schema.dump").open("rb") as handle:
+                run_pg("pg_restore", ["--dbname=" + stage_name, "--exit-on-error",
+                       "--no-owner", "--no-privileges"], dsn, database=stage_name,
+                       container=container, stdin=handle)
+            # 在同一快照中读取基础数据，源库的现有向量不发生变动。
+            with stage_engine.begin() as stage:
+                remove_vector_schema(stage)
+                copy_base_codes(source, stage)
+        # 两种格式都成功生成后，才替换输出文件。
+        for name, format_name in (("hscode_dump.sql", "plain"), ("hscode_dump.dump", "custom")):
+            with (work / name).open("wb") as handle:
+                run_pg("pg_dump", [f"--format={format_name}", "--no-owner", "--no-privileges"],
+                       dsn, database=stage_name, container=container, stdout=handle)
+        for name in ("hscode_dump.sql", "hscode_dump.dump"):
+            with tempfile.NamedTemporaryFile(dir=output, delete=False) as handle:
+                pending = Path(handle.name)
+                try:
+                    with (work / name).open("rb") as source_file:
+                        shutil.copyfileobj(source_file, handle)
+                except BaseException:
+                    pending.unlink(missing_ok=True)
+                    raise
+            # PostgreSQL 初始化进程使用独立用户，需要能够读取基础导出。
+            pending.chmod(0o644)
+            pending.replace(output / name)
+        print(f"已导出基础数据：{output / 'hscode_dump.sql'}、{output / 'hscode_dump.dump'}")
 
 
 def main() -> None:

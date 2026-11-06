@@ -11,6 +11,7 @@ import uuid
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from sqlalchemy.exc import SQLAlchemyError
 
 from hscode.config import DEFAULT_DSN
 from scripts.update_us import COL_SQL, update, restore
@@ -53,7 +54,7 @@ class DatabaseUpdateTests(unittest.TestCase):
                                   "BEGIN RAISE EXCEPTION 'test failure'; END $$")
                         c.execute('CREATE TRIGGER reject_update BEFORE INSERT ON hs_code '
                                   'FOR EACH STATEMENT EXECUTE FUNCTION reject_update()')
-                    with self.assertRaises(psycopg.Error):
+                    with self.assertRaises(SQLAlchemyError):
                         update(dsn, '2026 Rev 21', raw, apply=True, directory=directory)
                     self.assertEqual(fingerprint('US'), before_us)
                     with psycopg.connect(dsn) as c:

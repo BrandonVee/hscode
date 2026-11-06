@@ -2,6 +2,10 @@
 
 本文说明项目 `public` schema 下的业务表、字段及维护规则，依据基础 SQL、查询代码、人工导入脚本和本机数据库结构核对。核对日期：2026-10-19。
 
+应用通过 SQLAlchemy 2 ORM 访问已有数据库：[models.py](../src/hscode/models.py) 映射三张业务表，[database.py](../src/hscode/database.py) 管理连接池和 Session，[repository.py](../src/hscode/repository.py) 封装查询。服务负责分词、检索阶梯、排序和响应清洗；美国维护脚本通过 ORM 批量写入并在单一事务中提交或回滚。应用启动不执行 `create_all`，不会自动变更表结构。
+
+全文检索使用 ORM 的 PostgreSQL 函数和运算符表达式，语义检索使用 `pgvector` 的 SQLAlchemy 类型。可选 `embedding` 列默认延迟加载，基础库缺少该列时仍可正常查询。字段元信息通过 SQLAlchemy `Inspector` 获取；基础数据导出在只读一致性快照中流式查询、分批写入，排除生成列和语义向量。`ts_stat` 必须接收查询文本，该文本由 ORM 编译器从白名单字段生成。PostgreSQL 专用的建库、扩展、表锁等 DDL 集中在 [postgres.py](../src/hscode/postgres.py)，索引通过 SQLAlchemy `Index` 创建；最终快照文件由 `pg_dump` / `pg_restore` 生成。子串兜底查询按编码排序后截取候选，避免无排序 `LIMIT` 导致结果漂移。
+
 ## 1. 表概览与关联
 
 | 表 | 用途 | 主键 | 当前数据 |
@@ -188,6 +192,10 @@ HAVING ch.code_count IS DISTINCT FROM count(c.code);
 | 文件 | 用途 |
 | --- | --- |
 | [基础 SQL](../data/hscode_dump.sql) | 表结构、主键、索引与基础数据；不含语义向量。 |
+| [ORM 模型](../src/hscode/models.py) | 三张业务表、全文检索生成列和可选向量字段的映射。 |
+| [连接与事务](../src/hscode/database.py) | 连接池、Session 和独立维护事务。 |
+| [PostgreSQL 管理](../src/hscode/postgres.py) | 集中封装数据库、可选向量结构和表锁 DDL。 |
+| [数据查询层](../src/hscode/repository.py) | 基于模型构造全文、向量、详情、章节和统计查询。 |
 | [查询服务](../src/hscode/server.py) | 检索、详情、章节目录、跨国对照及返回字段清洗。 |
 | [美国人工维护脚本](../scripts/update_us.py) | 从人工指定文件生成美国字段、维护章计数和版本元数据。 |
 | [向量构建脚本](../src/hscode/build_vectors.py) | 添加并生成可选 `embedding` 字段和 HNSW 索引。 |

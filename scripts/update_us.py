@@ -11,10 +11,14 @@ import os
 from pathlib import Path
 import re
 
-import psycopg
-from psycopg.rows import dict_row
+from sqlalchemy import delete, func, insert, select, update as sql_update
+from sqlalchemy.exc import SQLAlchemyError
 
 from hscode.config import DEFAULT_DSN
+from hscode.database import maintenance_session
+from hscode.models import DataRelease, HSChapter, HSCode
+from hscode.repository import rows as query_rows
+from hscode.postgres import lock_tables
 from hscode.server import tokenize_en
 
 COLUMNS = ("country", "code", "code_display", "code_len", "description", "description_en",
@@ -110,13 +114,15 @@ def save_json(path: Path, value: object) -> None:
 
 def update(dsn: str, release: str, raw: bytes, *, apply: bool, directory: Path) -> dict:
     rows = parse_rows(json.loads(raw))
-    with psycopg.connect(dsn, row_factory=dict_row) as conn:
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext('hscode.update_us'))")
+    with maintenance_session(dsn) as conn:
+        conn.execute(select(func.pg_advisory_xact_lock(func.hashtext("hscode.update_us"))))
         if apply:
-            conn.execute("LOCK TABLE hs_code, hs_chapter, data_release IN SHARE ROW EXCLUSIVE MODE")
-        old = conn.execute(f"SELECT {COL_SQL} FROM hs_code WHERE country='US' ORDER BY code").fetchall()
-        releases = conn.execute("SELECT * FROM data_release WHERE country='US'").fetchall()
-        chapters = conn.execute("SELECT * FROM hs_chapter WHERE country='US' ORDER BY chapter").fetchall()
+            lock_tables(conn.connection(), HSCode.__table__, HSChapter.__table__, DataRelease.__table__)
+        old = query_rows(conn, select(*(getattr(HSCode, name) for name in COLUMNS))
+                         .where(HSCode.country == "US").order_by(HSCode.code))
+        releases = query_rows(conn, select(*DataRelease.__table__.c).where(DataRelease.country == "US"))
+        chapters = query_rows(conn, select(*HSChapter.__table__.c)
+                              .where(HSChapter.country == "US").order_by(HSChapter.chapter))
         current = releases[0]["release"] if releases else None
         if len(releases) > 1:
             raise ValueError("美国版本元数据不唯一")
@@ -138,18 +144,16 @@ def update(dsn: str, release: str, raw: bytes, *, apply: bool, directory: Path) 
         backup = directory / f"us-{tag}-before.json"
         save_json(backup, {"format": 1, "rows": old, "chapters": chapters, "releases": releases})
         (directory / f"us-{tag}-source.json").write_bytes(raw)
-        # 暂存表计算生成列，全部校验通过后才替换线上美国行。
-        conn.execute("CREATE TEMP TABLE us_stage (LIKE hs_code INCLUDING DEFAULTS INCLUDING GENERATED) ON COMMIT DROP")
-        with conn.cursor().copy(f"COPY us_stage ({COL_SQL}) FROM STDIN") as copy:
-            for row in rows:
-                copy.write_row([row[k] for k in COLUMNS])
-        conn.execute("DELETE FROM hs_code WHERE country='US'")
-        conn.execute(f"INSERT INTO hs_code ({COL_SQL}) SELECT {COL_SQL} FROM us_stage")
+        # 删除与批量插入处于同一事务；生成列由数据库计算，任何失败均整体回滚。
+        conn.execute(delete(HSCode).where(HSCode.country == "US"))
+        conn.execute(insert(HSCode).execution_options(render_nulls=True), rows)
         for ch, count in counts.items():
-            conn.execute("UPDATE hs_chapter SET code_count=%s WHERE country='US' AND chapter=%s", (count, ch))
-        conn.execute("DELETE FROM data_release WHERE country='US'")
-        conn.execute("INSERT INTO data_release (country, system, release, source_url, record_count) "
-                     "VALUES ('US', 'HTSUS', %s, %s, %s)", (release, source_url(release), len(rows)))
+            conn.execute(sql_update(HSChapter).where(HSChapter.country == "US", HSChapter.chapter == ch)
+                         .values(code_count=count))
+        conn.execute(delete(DataRelease).where(DataRelease.country == "US"))
+        conn.add(DataRelease(country="US", system="HTSUS", release=release,
+                             source_url=source_url(release), record_count=len(rows)))
+        conn.flush()
         report.update(applied=True, backup=str(backup.resolve()))
         save_json(directory / f"us-{tag}-report.json", report)
     return report
@@ -160,22 +164,22 @@ def restore(dsn: str, path: Path) -> None:
     if snapshot.get("format") != 1 or not snapshot["rows"] or any(
             row["country"] != "US" for key in ("rows", "chapters", "releases") for row in snapshot[key]):
         raise ValueError("非法美国回滚快照")
-    with psycopg.connect(dsn) as conn:
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext('hscode.update_us'))")
-        conn.execute("LOCK TABLE hs_code, hs_chapter, data_release IN SHARE ROW EXCLUSIVE MODE")
-        conn.execute("DELETE FROM hs_code WHERE country='US'")
-        with conn.cursor().copy(f"COPY hs_code ({COL_SQL}) FROM STDIN") as copy:
-            for row in snapshot["rows"]:
-                copy.write_row([row[k] for k in COLUMNS])
-        conn.execute("DELETE FROM hs_chapter WHERE country='US'")
-        for row in snapshot["chapters"]:
-            conn.execute("INSERT INTO hs_chapter (country, chapter, title, code_count) VALUES (%s,%s,%s,%s)",
-                         tuple(row[k] for k in ("country", "chapter", "title", "code_count")))
-        conn.execute("DELETE FROM data_release WHERE country='US'")
-        for row in snapshot["releases"]:
-            conn.execute("INSERT INTO data_release (country,system,release,source_url,imported_at,record_count) "
-                         "VALUES (%s,%s,%s,%s,%s,%s)", tuple(row[k] for k in (
-                             "country", "system", "release", "source_url", "imported_at", "record_count")))
+    with maintenance_session(dsn) as conn:
+        conn.execute(select(func.pg_advisory_xact_lock(func.hashtext("hscode.update_us"))))
+        lock_tables(conn.connection(), HSCode.__table__, HSChapter.__table__, DataRelease.__table__)
+        conn.execute(delete(HSCode).where(HSCode.country == "US"))
+        conn.execute(insert(HSCode).execution_options(render_nulls=True),
+                     [{key: row[key] for key in COLUMNS} for row in snapshot["rows"]])
+        conn.execute(delete(HSChapter).where(HSChapter.country == "US"))
+        conn.execute(insert(HSChapter).execution_options(render_nulls=True), snapshot["chapters"])
+        conn.execute(delete(DataRelease).where(DataRelease.country == "US"))
+        if snapshot["releases"]:
+            releases = [{key: row[key] for key in (
+                "country", "system", "release", "source_url", "imported_at", "record_count",
+            )} for row in snapshot["releases"]]
+            for row in releases:
+                row["imported_at"] = datetime.fromisoformat(row["imported_at"])
+            conn.execute(insert(DataRelease).execution_options(render_nulls=True), releases)
 
 
 def main() -> None:
@@ -204,7 +208,7 @@ def main() -> None:
         raw = args.file.read_bytes()
         report = update(args.dsn, release, raw, apply=args.apply, directory=args.backup_dir)
         print(json.dumps(report, ensure_ascii=False, indent=2))
-    except (ValueError, OSError, KeyError, TypeError, psycopg.Error) as exc:
+    except (ValueError, OSError, KeyError, TypeError, SQLAlchemyError) as exc:
         parser.exit(1, f"美国数据更新失败（事务未提交）：{type(exc).__name__}: {exc}\n")
 
 

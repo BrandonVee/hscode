@@ -24,8 +24,12 @@ def load_model(*, threads: int | None = None, download: bool = True):
                          specific_model_path=model_path or None)
 
 
-def vector_literal(values: Iterable[float]) -> str:
+def vector_values(values: Iterable[float]) -> list[float]:
     vector = [float(value) for value in values]
     if len(vector) != DIMENSION or not all(math.isfinite(value) for value in vector):
         raise ValueError(f"模型必须输出 {DIMENSION} 维有限数值")
-    return "[" + ",".join(f"{value:.6f}" for value in vector) + "]"
+    return [round(value, 6) for value in vector]
+
+
+def vector_literal(values: Iterable[float]) -> str:
+    return "[" + ",".join(f"{value:.6f}" for value in vector_values(values)) + "]"

@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
-import os
 import time
-import psycopg
-from psycopg.rows import dict_row
+from sqlalchemy import bindparam, func, select, update
+from sqlalchemy.orm import Session
 
-from .embeddings import DIMENSION, MODEL_NAME, load_model, vector_literal
+from .embeddings import DIMENSION, MODEL_NAME, load_model, vector_values
+from .database import make_engine
+from .models import HSCode
+from .repository import rows as query_rows
+from .postgres import ensure_vector_column, ensure_vector_index
 from .config import DEFAULT_DSN
 
 
@@ -20,77 +23,72 @@ def positive_int(value: str) -> int:
 
 def build_vectors(dsn: str, *, batch_size: int = 64, threads: int = 4,
                   rebuild: bool = False, limit: int | None = None) -> int:
-    # 会话锁避免两个构建进程同时改写同一批数据。
-    with psycopg.connect(dsn, autocommit=True, row_factory=dict_row) as conn:
-        locked = conn.execute(
-            "SELECT pg_try_advisory_lock(hashtext('hscode.build_vectors')) AS locked"
-        ).fetchone()["locked"]
-        if not locked:
-            raise RuntimeError("已有向量生成任务正在运行")
-        conn.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
-        conn.execute(
-            f"ALTER TABLE hs_code ADD COLUMN IF NOT EXISTS embedding public.vector({DIMENSION})"
-        )
-        column_type = conn.execute(
-            "SELECT format_type(atttypid, atttypmod) AS type FROM pg_attribute "
-            "WHERE attrelid = 'hs_code'::regclass AND attname = 'embedding' AND NOT attisdropped"
-        ).fetchone()["type"]
-        if column_type != f"vector({DIMENSION})":
-            raise RuntimeError(f"embedding 类型不匹配：{column_type}")
-        predicate = "" if rebuild else " AND embedding IS NULL"
-        pending = conn.execute(
-            f"SELECT count(*) AS n FROM hs_code WHERE country = 'CN'{predicate}"
-        ).fetchone()["n"]
-        target = min(pending, limit) if limit is not None else pending
-        print(f"模型 {MODEL_NAME}，维度 {DIMENSION}；待生成 {target} 条", flush=True)
-        generated = 0
-        if target:
-            started = time.perf_counter()
-            print("准备模型：读取缓存或首次下载；此时尚未开始生成向量", flush=True)
-            try:
-                model = load_model(threads=threads)
-            except Exception as exc:
-                raise RuntimeError(
-                    "模型准备失败：请配置可访问的 HF_ENDPOINT，或通过 HS_MODEL_PATH 使用本地模型。"
-                    f"原始错误：{exc}"
-                ) from exc
-            print(f"模型已就绪，用时 {time.perf_counter() - started:.1f} 秒；开始生成向量", flush=True)
-            last_code = ""
-            while generated < target:
-                rows = conn.execute(
-                    f"SELECT code, description FROM hs_code "
-                    f"WHERE country = 'CN' AND code > %s{predicate} ORDER BY code LIMIT %s",
-                    (last_code, min(batch_size, target - generated)),
-                ).fetchall()
-                if not rows:
-                    break
-                vectors = list(model.embed(
-                    [row["description"] for row in rows], batch_size=batch_size
-                ))
-                updates = [(vector_literal(vector), row["code"], row["description"])
-                           for row, vector in zip(rows, vectors, strict=True)]
-                with conn.transaction():
-                    with conn.cursor() as cursor:
-                        # 推理期间品名被编辑时，回滚本批，避免写入过时向量。
-                        cursor.executemany(
-                            "UPDATE hs_code SET embedding = %s::vector "
-                            "WHERE country = 'CN' AND code = %s AND description = %s",
-                            updates,
-                        )
-                        if cursor.rowcount != len(rows):
-                            raise RuntimeError("品名在生成期间发生变化，请重新运行")
-                generated += len(rows)
-                last_code = rows[-1]["code"]
-                print(f"已生成 {generated}/{target}", flush=True)
-        print("建立或检查 HNSW 索引", flush=True)
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_hs_code_embedding ON hs_code "
-            "USING hnsw (embedding public.vector_cosine_ops) "
-            "WITH (m = 16, ef_construction = 64)"
-        )
-        conn.execute("ANALYZE hs_code")
-        print(f"完成，本次写入 {generated} 条", flush=True)
-        return generated
+    # 独占连接贯穿任务；会话锁跨批次提交保留，最终关闭连接释放。
+    engine = make_engine(dsn)
+    try:
+        with engine.connect() as connection, Session(connection) as conn:
+            return _build_vectors(conn, batch_size=batch_size, threads=threads,
+                                  rebuild=rebuild, limit=limit)
+    finally:
+        engine.dispose()
+
+
+def _build_vectors(conn: Session, *, batch_size: int, threads: int,
+                   rebuild: bool, limit: int | None) -> int:
+    locked = conn.scalar(select(func.pg_try_advisory_lock(func.hashtext("hscode.build_vectors"))))
+    if not locked:
+        raise RuntimeError("已有向量生成任务正在运行")
+    ensure_vector_column(conn.connection())
+    conditions = [HSCode.country == "CN"]
+    if not rebuild:
+        conditions.append(HSCode.embedding.is_(None))
+    pending = conn.scalar(select(func.count()).select_from(HSCode).where(*conditions))
+    conn.commit()
+    target = min(pending, limit) if limit is not None else pending
+    print(f"模型 {MODEL_NAME}，维度 {DIMENSION}；待生成 {target} 条", flush=True)
+    generated = 0
+    if target:
+        started = time.perf_counter()
+        print("准备模型：读取缓存或首次下载；此时尚未开始生成向量", flush=True)
+        try:
+            model = load_model(threads=threads)
+        except Exception as exc:
+            raise RuntimeError(
+                "模型准备失败：请配置可访问的 HF_ENDPOINT，或通过 HS_MODEL_PATH 使用本地模型。"
+                f"原始错误：{exc}"
+            ) from exc
+        print(f"模型已就绪，用时 {time.perf_counter() - started:.1f} 秒；开始生成向量", flush=True)
+        last_code = ""
+        while generated < target:
+            rows = query_rows(conn, select(HSCode.code, HSCode.description)
+                              .where(*conditions, HSCode.code > last_code)
+                              .order_by(HSCode.code).limit(min(batch_size, target - generated)))
+            if not rows:
+                break
+            vectors = list(model.embed(
+                [row["description"] for row in rows], batch_size=batch_size
+            ))
+            updates = [{"vector": vector_values(vector), "row_code": row["code"], "row_description": row["description"]}
+                       for row, vector in zip(rows, vectors, strict=True)]
+            # 用 Core 批量表达式附加品名检查；不依赖 ORM 按主键更新的限制。
+            result = conn.connection().execute(
+                update(HSCode.__table__).where(
+                    HSCode.country == "CN", HSCode.code == bindparam("row_code"),
+                    HSCode.description == bindparam("row_description"),
+                ).values(embedding=bindparam("vector")), updates,
+            )
+            if result.rowcount != len(rows):
+                conn.rollback()
+                raise RuntimeError("品名在生成期间发生变化，请重新运行")
+            conn.commit()
+            generated += len(rows)
+            last_code = rows[-1]["code"]
+            print(f"已生成 {generated}/{target}", flush=True)
+    print("建立或检查 HNSW 索引", flush=True)
+    ensure_vector_index(conn.connection())
+    conn.commit()
+    print(f"完成，本次写入 {generated} 条", flush=True)
+    return generated
 
 
 def main() -> None:
